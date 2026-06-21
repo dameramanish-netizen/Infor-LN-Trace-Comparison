@@ -2,7 +2,7 @@
 title: Infor LN Trace Compare
 emoji: ⚖️
 colorFrom: green
-colorTo: slate
+colorTo: gray
 sdk: streamlit
 sdk_version: 1.35.0
 app_file: app.py
