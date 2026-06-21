@@ -2,8 +2,8 @@ name: Sync to Hugging Face Spaces
 
 on:
   push:
-    branches: [main]
-  # Allows you to manually trigger the sync if needed
+    # This allows it to trigger whether your default branch is main OR master
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -19,4 +19,5 @@ jobs:
       - name: Push to Hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://Manish0000007:$HF_TOKEN@huggingface.co/spaces/Manish0000007/Infor-LN-Trace-Compare main
+        # HEAD detects whatever branch GitHub is currently running on (main or master)
+        run: git push --force https://Manish0000007:$HF_TOKEN@huggingface.co/spaces/Manish0000007/Infor-LN-Trace-Compare HEAD:main
