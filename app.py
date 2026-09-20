@@ -5,11 +5,10 @@ import zipfile
 import gzip
 import io
 from html import escape
-from difflib import SequenceMatcher
 
 # Silence background noise
 logging.getLogger("streamlit.runtime.scriptrunner.script_runner").setLevel(logging.ERROR)
-st.set_page_config(layout="wide", page_title="Infor LN Precise Trace Explorer", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="Infor LN Precise Trace Explorer", page_icon="??")
 
 # --- MASTER LAYOUT & STYLING ---
 st.markdown("""
@@ -91,7 +90,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚖️ Infor LN State-Driven Trace Explorer")
+st.title("?? Infor LN State-Driven Trace Explorer")
 st.caption("Click structural call rows directly to dynamically explore deep child layers with precise line indexing.")
 
 # --- NAVIGATION HISTORY STACKS ---
@@ -226,8 +225,6 @@ def render_interactive_explorer(lines, active_keywords, key_prefix, state_key):
 
 def reset_panel(side):
     """Uploader callback: reset only the changed panel, including removal."""
-    st.session_state.pop('flow_comparison', None)
-    st.session_state['comparison_generation'] = st.session_state.get('comparison_generation', 0) + 1
     for key in (f'master_{side}', f'loaded_{side}'):
         st.session_state.pop(key, None)
     st.session_state[f'active_focus_{side}'] = []
@@ -241,137 +238,6 @@ def load_panel(upload, side):
     if not st.session_state.get(f'loaded_{side}', False):
         st.session_state[f'master_{side}'] = process_uploaded_file(upload)
         st.session_state[f'loaded_{side}'] = True
-
-
-def flow_events(rows, root_pos):
-    """Full selected subtree, with relative depths; no argument values in tokens."""
-    root = rows[root_pos]
-    events = []
-    problems = []
-    pending = [(root_pos, False)]
-    while pending:
-        pos, returning = pending.pop()
-        call = rows[pos]
-        depth = call['depth'] - root['depth']
-        if returning:
-            if call['return_pos'] is not None:
-                ret = rows[call['return_pos']]
-                events.append((('RETURN', depth, call['function']), ret['line_number']))
-            continue
-        events.append((('CALL', depth, call['function']), call['line_number']))
-        if call['status'] != 'Complete':
-            problems.append(f"Line {call['line_number']}: {call['status']}")
-        pending.append((pos, True))
-        pending.extend((child, False) for child in reversed(call['children']))
-    # Do not certify a match if the bounded execution contains unlinked events.
-    if root['return_pos'] is not None:
-        linked = {line for _, line in events}
-        for row in rows[root_pos:root['return_pos'] + 1]:
-            if row['pid'] == root['pid'] and row['line_number'] not in linked:
-                if row['is_call'] or row['is_return'] or re.search(r'Flow:\s*(?:-->>|<<--|-->|<--)', row['raw']):
-                    problems.append(f"Line {row['line_number']}: structural event outside the reconstructed subtree")
-    return events, problems
-
-
-def compare_flows(left_rows, left_pos, right_rows, right_pos):
-    left, lp = flow_events(left_rows, left_pos)
-    right, rp = flow_events(right_rows, right_pos)
-    lt = [e[0] for e in left]
-    rt = [e[0] for e in right]
-    same = lt == rt
-    # Bound expensive alignment without truncating or falsely declaring a match.
-    if not same and max(len(lt), len(rt)) > 4000:
-        return {'limited': True, 'left_count': len(lt), 'right_count': len(rt), 'problems': lp + rp}
-    opcodes = [('equal', 0, len(lt), 0, len(rt))] if same else SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes()
-    result_rows = []
-    for tag, a, b, c, d in opcodes:
-        status = {'equal': 'Match', 'delete': 'Left only', 'insert': 'Right only',
-                  'replace': 'Different structure'}[tag]
-        for offset in range(max(b-a, d-c)):
-            le = left[a+offset] if a+offset < b else None
-            revent = right[c+offset] if c+offset < d else None
-            def describe(event):
-                if event is None:
-                    return ''
-                (kind, depth, function), line = event
-                return f"{'  ' * depth}{kind} {function} [relative depth {depth}]"
-            result_rows.append({'Status': status,
-                                'Left line': le[1] if le else None,
-                                'Left flow': describe(le),
-                                'Right line': revent[1] if revent else None,
-                                'Right flow': describe(revent)})
-    return {'limited': False, 'same': same, 'left_count': len(left), 'right_count': len(right),
-            'problems': ['Left: '+p for p in lp] + ['Right: '+p for p in rp], 'rows': result_rows}
-
-
-def render_flow_comparison(left_rows, right_rows):
-    st.subheader('Compare selected flows')
-    st.caption('Compares all nested calls and returns by function, order, and relative depth. Arguments, timestamps, object names and cross-file process IDs are ignored.')
-    lh = st.session_state.get('active_focus_succ', [])
-    rh = st.session_state.get('active_focus_fail', [])
-    if not lh or not rh:
-        st.session_state.pop('flow_comparison', None)
-        st.info('Open one function occurrence in each panel, then compare them.')
-        return
-    left, right = left_rows[lh[-1]], right_rows[rh[-1]]
-    signature = (st.session_state.get('comparison_generation', 0), lh[-1], rh[-1])
-    st.write(f"Left: {left['function']} · line {left['line_number']} · process {left['pid']}  |  "
-             f"Right: {right['function']} · line {right['line_number']} · process {right['pid']}")
-    saved = st.session_state.get('flow_comparison')
-    if saved and saved['signature'] != signature:
-        st.session_state.pop('flow_comparison', None)
-        saved = None
-    if st.button('Compare selected flows', key='compare_flows', type='primary'):
-        with st.spinner('Comparing selected execution flows...'):
-            result = compare_flows(left_rows, lh[-1], right_rows, rh[-1])
-        saved = {'signature': signature, 'result': result}
-        st.session_state.flow_comparison = saved
-        st.session_state.difference_index = 0
-        st.session_state.comparison_page = 1
-    if not saved:
-        return
-    result = saved['result']
-    if result['limited']:
-        st.warning('These flows differ, but detailed alignment exceeds the 4,000-event limit. Select smaller child functions in both panels. No events were silently omitted.')
-        st.write(f"Left: {result['left_count']:,} events; right: {result['right_count']:,} events")
-        return
-    if result['problems']:
-        st.warning('Incomplete trace: a complete flow match cannot be confirmed. Differences below describe only the observed events.')
-        with st.expander('Incomplete or unlinked events'):
-            st.text('\n'.join(result['problems']))
-    elif result['same']:
-        st.success('Selected flows match: same functions, order, and nesting.')
-    else:
-        st.warning('Selected flows differ.')
-    if result['same'] and result['problems']:
-        st.info('The observed event sequences match, but at least one selected flow is incomplete.')
-    rows = result['rows']
-    differences = [i for i, row in enumerate(rows) if row['Status'] != 'Match']
-    st.caption(f"Left: {result['left_count']:,} events · Right: {result['right_count']:,} events · {len(differences):,} differing aligned rows")
-    if differences:
-        prev, nxt = st.columns(2)
-        if prev.button('Previous difference', key='previous_difference'):
-            st.session_state.difference_index = (st.session_state.get('difference_index', 0)-1) % len(differences)
-        if nxt.button('Next difference', key='next_difference'):
-            st.session_state.difference_index = (st.session_state.get('difference_index', 0)+1) % len(differences)
-        number = st.session_state.get('difference_index', 0) % len(differences)
-        row = rows[differences[number]]
-        st.markdown(f"**Difference {number+1} of {len(differences)} — {row['Status']}**")
-        lcol, rcol = st.columns(2)
-        lcol.code(f"Line {row['Left line']}\n{row['Left flow']}" if row['Left flow'] else 'No corresponding event', language=None)
-        rcol.code(f"Line {row['Right line']}\n{row['Right flow']}" if row['Right flow'] else 'No corresponding event', language=None)
-    only = st.checkbox('Show differences only', value=True, key='differences_only')
-    visible = [rows[i] for i in differences] if only else rows
-    if visible:
-        pages = (len(visible)+99)//100
-        if st.session_state.get('comparison_page', 1) > pages:
-            st.session_state.comparison_page = 1
-        page = st.number_input('Results page', min_value=1, max_value=pages, step=1, key='comparison_page')
-        st.dataframe(visible[(page-1)*100:page*100], use_container_width=True)
-    else:
-        st.info('No differing rows to display.')
-    st.caption('Alignment preserves repeated calls. A reordered call may appear as left-only and right-only events; these are alignment positions, not proof that the function is absent from the whole trace.')
-
 
 
 # --- ARCHIVE DECOMPRESSION UTILITY ---
@@ -393,25 +259,25 @@ def process_uploaded_file(uploaded_file):
         return ""
 
 # --- SIDEBAR CONTROL HUB ---
-st.sidebar.header("🛠️ Workspace Controls")
+st.sidebar.header("??? Workspace Controls")
 if st.sidebar.button("Core Workspace Reset / Clear All"):
     st.session_state.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎛️ Display Filters")
+st.sidebar.subheader("??? Display Filters")
 
-st.sidebar.markdown("**🔍 Multi-Keyword Filter Registry**")
+st.sidebar.markdown("**?? Multi-Keyword Filter Registry**")
 new_keyword = st.sidebar.text_input("Enter Keyword to Filter Trees", "").strip()
 
 col_kw_btn1, col_kw_btn2 = st.sidebar.columns(2)
 with col_kw_btn1:
-    if st.button("➕ Add Keyword"):
+    if st.button("? Add Keyword"):
         if new_keyword and new_keyword not in st.session_state['trace_keywords']:
             st.session_state['trace_keywords'].append(new_keyword)
             st.rerun()
 with col_kw_btn2:
-    if st.button("🗑️ Clear Keywords"):
+    if st.button("??? Clear Keywords"):
         st.session_state['trace_keywords'] = []
         st.session_state['active_focus_succ'] = []
         st.session_state['active_focus_fail'] = []
@@ -424,7 +290,7 @@ else:
     st.sidebar.info("Showing all function calls — no keyword filter applied.")
 
 # Added: Explicit Search Execution Trigger Button
-if st.sidebar.button("🔍 Search", type="primary"):
+if st.sidebar.button("?? Search", type="primary"):
     st.session_state['active_focus_succ'] = []
     st.session_state['active_focus_fail'] = []
     st.rerun()
@@ -435,12 +301,12 @@ col_uploader_l, col_uploader_r = st.columns(2)
 allowed_formats = ["txt", "gz", "zip", "log"]
 
 with col_uploader_l:
-    st.markdown("### 🟢 Stable Flow Case")
+    st.markdown("### ?? Stable Flow Case")
     uploaded_succ = st.file_uploader("Drop working trace log...", type=allowed_formats, key="u_succ", on_change=reset_panel, args=("succ",))
     load_panel(uploaded_succ, "succ")
 
 with col_uploader_r:
-    st.markdown("### 🔴 Defective Flow Case")
+    st.markdown("### ?? Defective Flow Case")
     uploaded_fail = st.file_uploader("Drop broken trace log...", type=allowed_formats, key="u_fail", on_change=reset_panel, args=("fail",))
     load_panel(uploaded_fail, "fail")
 
@@ -454,7 +320,7 @@ if trace_succ_raw or trace_fail_raw:
     keywords = st.session_state['trace_keywords']
     
     with panel_left:
-        st.markdown("### 🟢 Stable Tree Workspace")
+        st.markdown("### ?? Stable Tree Workspace")
         if trace_succ_raw:
             data_succ = scan_trace_linearly(trace_succ_raw)
             render_interactive_explorer(data_succ, keywords, "succ", "active_focus_succ")
@@ -462,13 +328,9 @@ if trace_succ_raw or trace_fail_raw:
             st.info("Awaiting structural baseline input.")
 
     with panel_right:
-        st.markdown("### 🔴 Defective Tree Workspace")
+        st.markdown("### ?? Defective Tree Workspace")
         if trace_fail_raw:
             data_fail = scan_trace_linearly(trace_fail_raw)
             render_interactive_explorer(data_fail, keywords, "fail", "active_focus_fail")
         else:
             st.info("Awaiting defective log data input.")
-
-if trace_succ_raw and trace_fail_raw:
-    st.divider()
-    render_flow_comparison(data_succ, data_fail)
