@@ -4,6 +4,7 @@ import logging
 import zipfile
 import gzip
 import io
+from html import escape
 
 # Silence background noise
 logging.getLogger("streamlit.runtime.scriptrunner.script_runner").setLevel(logging.ERROR)
@@ -98,106 +99,152 @@ if 'active_focus_fail' not in st.session_state: st.session_state['active_focus_f
 if 'trace_keywords' not in st.session_state: st.session_state['trace_keywords'] = []
 
 # --- HIGH-SPEED LINEAR SCANNER ---
-@st.cache_data(max_entries=4, show_spinner="Parsing log streams...")
+@st.cache_data(max_entries=4, show_spinner="Parsing trace calls...")
 def scan_trace_linearly(file_content):
-    raw_lines = file_content.splitlines()
-    processed_lines = []
-    
-    depth_regex = re.compile(r'\(depth\s+(\d+)\):')
-    
-    for idx, line in enumerate(raw_lines):
-        if not line.strip(): continue
-        
-        display_text = line.split("Flow:")[-1] if "Flow:" in line else " " + line.strip()
-        display_text = display_text.strip()
-        
-        depth_match = depth_regex.search(line)
-        depth = int(depth_match.group(1)) if depth_match else 0
-        
-        is_call = "-->" in line or "-->>" in line
-        is_return = "<--" in line or "<<--" in line
-        
-        processed_lines.append({
-            "idx": idx,
-            "text": display_text,
-            "raw": line,
-            "depth": depth,
-            "is_call": is_call,
-            "is_return": is_return
-        })
-    return processed_lines
+    """Build per-process call relationships; positions never use file line numbers."""
+    rows = []
+    stacks = {}
+    event_re = re.compile(r'Flow:\s*(-->>|<<--|-->|<--)\s*\(depth\s+(\d+)\):\s*([^\s(]+)\s*\(')
+    process_re = re.compile(r':::\((\d+)\):')
+    object_re = re.compile(r'\(in object\s+([^)]*)\)')
 
-# --- REFINED STATE-DRIVEN EXPLORER ---
+    def abandon(pos, reason):
+        rows[pos]['status'] = reason
+
+    for line_number, raw in enumerate(file_content.splitlines(), 1):
+        # Explicit trace discontinuities invalidate currently open calls.
+        if re.search(r'<<\s*(?:Pausing|Restarted|Resumed) trace\s*>>', raw, re.I):
+            for stack in stacks.values():
+                for pos in stack:
+                    abandon(pos, 'Incomplete: trace was paused or restarted')
+            stacks.clear()
+        if not raw.strip():
+            continue
+        event = event_re.search(raw)
+        process = process_re.search(raw)
+        obj = object_re.search(raw)
+        pos = len(rows)
+        row = {
+            'pos': pos, 'line_number': line_number,
+            'text': raw.split('Flow:', 1)[-1].strip(), 'raw': raw,
+            'pid': process.group(1) if process else None,
+            'depth': int(event.group(2)) if event else None,
+            'function': event.group(3) if event else None,
+            'object': obj.group(1).strip() if obj else None,
+            'is_call': bool(event and event.group(1) in ('-->>', '-->')),
+            'is_return': bool(event and event.group(1) in ('<<--', '<--')),
+            'parent': None, 'children': [], 'return_pos': None,
+            'status': 'Not a structural event',
+        }
+        rows.append(row)
+        if not event:
+            continue
+        if row['pid'] is None:
+            row['status'] = 'Unmatched: no process ID'
+            continue
+        stack = stacks.setdefault(row['pid'], [])
+        depth = row['depth']
+        if row['is_call']:
+            while stack and rows[stack[-1]]['depth'] >= depth:
+                abandon(stack.pop(), 'Incomplete: another call replaced this depth')
+            if stack and rows[stack[-1]]['depth'] == depth - 1:
+                row['parent'] = stack[-1]
+                rows[stack[-1]]['children'].append(pos)
+            row['status'] = 'Incomplete: no matching return found'
+            stack.append(pos)
+        else:
+            while stack and rows[stack[-1]]['depth'] > depth:
+                abandon(stack.pop(), 'Incomplete: ancestor returned before this call')
+            if not stack or rows[stack[-1]]['depth'] != depth:
+                row['status'] = 'Unmatched return'
+                continue
+            call_pos = stack.pop()
+            call = rows[call_pos]
+            if (call['function'] == row['function']
+                    and call['object'] is not None
+                    and call['object'] == row['object']):
+                call['return_pos'] = pos
+                call['status'] = 'Complete'
+                row['status'] = 'Matched return'
+            else:
+                abandon(call_pos, 'Incomplete: conflicting return at this depth')
+                row['status'] = 'Unmatched return: function or object differs'
+    return rows
+
+
 def render_interactive_explorer(lines, active_keywords, key_prefix, state_key):
+    """Navigation stores parsed positions and uses explicit child/return links."""
     focus_stack = st.session_state[state_key]
-    
-    # 1. INITIAL ANCHORING
+    if any(not isinstance(pos, int) or not 0 <= pos < len(lines) for pos in focus_stack):
+        focus_stack = []
+        st.session_state[state_key] = focus_stack
+
+    def label(row):
+        return f"Line {row['line_number']} | Process {row['pid'] or '?'} | {row['text']}"
+
+    def return_line(row):
+        st.markdown("<div class='return-line'>" + escape(label(row)) + "</div>",
+                    unsafe_allow_html=True)
+
     if not focus_stack:
-        for row in lines:
-            if row["is_call"]:
-                # Evaluates multiple keywords: passes if any registered keyword matches the line
-                matches_kw = not active_keywords or any(kw.lower() in row["raw"].lower() for kw in active_keywords)
-                if matches_kw:
-                    button_label = row["text"]
-                    if st.button(button_label, key=f"root_{key_prefix}_{row['idx']}"):
-                        focus_stack.append(row)
-                        st.session_state[state_key] = focus_stack
-                        st.rerun()
+        matches = [r for r in lines if r['is_call'] and (
+            not active_keywords or any(kw.casefold() in r['raw'].casefold() for kw in active_keywords))]
+        st.caption(f"{len(matches):,} matching function calls")
+        for row in matches:
+            if st.button(label(row), key=f"root_{key_prefix}_{row['pos']}"):
+                focus_stack.append(row['pos'])
+                st.rerun()
+        if not matches:
+            st.info('No function calls match the current keywords.')
         return
 
-    # 2. NAVIGATION & CONTEXT HEADER
-    if st.button("⬅️ Back to Previous Level", key=f"back_{key_prefix}"):
+    if st.button('Back to Previous Level', key=f'back_{key_prefix}'):
         focus_stack.pop()
-        st.session_state[state_key] = focus_stack
         st.rerun()
+    anchor = lines[focus_stack[-1]]
+    st.markdown("<div class='focus-banner'><b>" + escape(label(anchor)) + "</b></div>",
+                unsafe_allow_html=True)
+    if anchor['status'] != 'Complete':
+        st.warning(anchor['status'] + '. Only observed child calls are shown; no return is guessed.')
+    st.markdown('**Inner Execution Layers:**')
+    for child_pos in anchor['children']:
+        child = lines[child_pos]
+        if st.button(label(child), key=f"btn_{key_prefix}_{child_pos}"):
+            focus_stack.append(child_pos)
+            st.rerun()
+        if child['return_pos'] is not None:
+            return_line(lines[child['return_pos']])
+        else:
+            st.caption(f"Line {child['line_number']}: {child['status']}")
+    if not anchor['children']:
+        st.info('No directly nested calls were observed for this process and depth.')
+    if anchor['return_pos'] is not None:
+        st.markdown('**Selected call returns:**')
+        return_line(lines[anchor['return_pos']])
 
-    current_anchor = focus_stack[-1]
-    
-    # 3. BOUNDARY SCANNING
-    start_idx = current_anchor["idx"]
-    anchor_depth = current_anchor["depth"]
-    end_idx = len(lines)
-    for idx in range(start_idx + 1, len(lines)):
-        if lines[idx]["is_return"] and lines[idx]["depth"] == anchor_depth:
-            end_idx = idx
-            break
 
-    window_lines = lines[start_idx:end_idx + 1]
-    
-    # 4. VISUAL HIERARCHY RENDERING
-    st.markdown(f"""
-        <div style='background:#1E293B; padding:15px; border-radius:8px; border-top: 4px solid #10B981;'>
-            <code style='color:#34D399;'>-->> (depth {anchor_depth})</code><br>
-            <b>{current_anchor['text']}</b>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("<br><b>Inner Execution Layers:</b>", unsafe_allow_html=True)
-    
-    found_children = False
-    for row in window_lines:
-        if row["depth"] == anchor_depth + 1:
-            found_children = True
-            if row["is_call"]:
-                button_label = row["text"]
-                if st.button(button_label, key=f"btn_{key_prefix}_{row['idx']}"):
-                    focus_stack.append(row)
-                    st.session_state[state_key] = focus_stack
-                    st.rerun()
-            elif row["is_return"]:
-                st.markdown(f"<div class='return-line' style='margin-left:20px;'>{row['text']}</div>", unsafe_allow_html=True)
+def reset_panel(side):
+    """Uploader callback: reset only the changed panel, including removal."""
+    for key in (f'master_{side}', f'loaded_{side}'):
+        st.session_state.pop(key, None)
+    st.session_state[f'active_focus_{side}'] = []
 
-    if not found_children:
-        st.info("No nested function calls found within this depth layer.")
 
-    if end_idx < len(lines):
-        st.markdown(f"<div class='return-line' style='border-top: 1px dashed #38BDF8; margin-top:10px;'>{lines[end_idx]['text']}</div>", unsafe_allow_html=True)
-        
+def load_panel(upload, side):
+    if upload is None:
+        reset_panel(side)
+        return
+    # Callback invalidates this flag on each upload change. Decode only once.
+    if not st.session_state.get(f'loaded_{side}', False):
+        st.session_state[f'master_{side}'] = process_uploaded_file(upload)
+        st.session_state[f'loaded_{side}'] = True
+
+
 # --- ARCHIVE DECOMPRESSION UTILITY ---
 def process_uploaded_file(uploaded_file):
     if uploaded_file is None: return ""
     name = uploaded_file.name
-    bytes_data = uploaded_file.read()
+    bytes_data = uploaded_file.getvalue()
     try:
         if name.endswith('.zip'):
             with zipfile.ZipFile(io.BytesIO(bytes_data)) as z:
@@ -237,10 +284,10 @@ with col_kw_btn2:
         st.rerun()
 
 if st.session_state['trace_keywords']:
-    kw_html = "".join([f"<span class='keyword-badge'>{kw}</span>" for kw in st.session_state['trace_keywords']])
+    kw_html = "".join([f"<span class='keyword-badge'>{escape(kw)}</span>" for kw in st.session_state['trace_keywords']])
     st.sidebar.markdown(f"<div class='registry-box'>{kw_html}</div>", unsafe_allow_html=True)
 else:
-    st.sidebar.info("Displaying full raw streams (No active keywords).")
+    st.sidebar.info("Showing all function calls — no keyword filter applied.")
 
 # Added: Explicit Search Execution Trigger Button
 if st.sidebar.button("🔍 Search", type="primary"):
@@ -255,13 +302,13 @@ allowed_formats = ["txt", "gz", "zip", "log"]
 
 with col_uploader_l:
     st.markdown("### 🟢 Stable Flow Case")
-    uploaded_succ = st.file_uploader("Drop working trace log...", type=allowed_formats, key="u_succ")
-    if uploaded_succ: st.session_state['master_succ'] = process_uploaded_file(uploaded_succ)
+    uploaded_succ = st.file_uploader("Drop working trace log...", type=allowed_formats, key="u_succ", on_change=reset_panel, args=("succ",))
+    load_panel(uploaded_succ, "succ")
 
 with col_uploader_r:
     st.markdown("### 🔴 Defective Flow Case")
-    uploaded_fail = st.file_uploader("Drop broken trace log...", type=allowed_formats, key="u_fail")
-    if uploaded_fail: st.session_state['master_fail'] = process_uploaded_file(uploaded_fail)
+    uploaded_fail = st.file_uploader("Drop broken trace log...", type=allowed_formats, key="u_fail", on_change=reset_panel, args=("fail",))
+    load_panel(uploaded_fail, "fail")
 
 trace_succ_raw = st.session_state.get('master_succ', '')
 trace_fail_raw = st.session_state.get('master_fail', '')
