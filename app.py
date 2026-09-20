@@ -8,7 +8,7 @@ from html import escape
 
 # Silence background noise
 logging.getLogger("streamlit.runtime.scriptrunner.script_runner").setLevel(logging.ERROR)
-st.set_page_config(layout="wide", page_title="Infor LN Precise Trace Explorer", page_icon="??")
+st.set_page_config(layout="wide", page_title="Infor LN Precise Trace Explorer", page_icon="⚖️")
 
 # --- MASTER LAYOUT & STYLING ---
 st.markdown("""
@@ -90,7 +90,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("?? Infor LN State-Driven Trace Explorer")
+st.title("⚖️ Infor LN State-Driven Trace Explorer")
 st.caption("Click structural call rows directly to dynamically explore deep child layers with precise line indexing.")
 
 # --- NAVIGATION HISTORY STACKS ---
@@ -259,25 +259,25 @@ def process_uploaded_file(uploaded_file):
         return ""
 
 # --- SIDEBAR CONTROL HUB ---
-st.sidebar.header("??? Workspace Controls")
+st.sidebar.header("🛠️ Workspace Controls")
 if st.sidebar.button("Core Workspace Reset / Clear All"):
     st.session_state.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("??? Display Filters")
+st.sidebar.subheader("🎛️ Display Filters")
 
-st.sidebar.markdown("**?? Multi-Keyword Filter Registry**")
+st.sidebar.markdown("**🔍 Multi-Keyword Filter Registry**")
 new_keyword = st.sidebar.text_input("Enter Keyword to Filter Trees", "").strip()
 
 col_kw_btn1, col_kw_btn2 = st.sidebar.columns(2)
 with col_kw_btn1:
-    if st.button("? Add Keyword"):
+    if st.button("➕ Add Keyword"):
         if new_keyword and new_keyword not in st.session_state['trace_keywords']:
             st.session_state['trace_keywords'].append(new_keyword)
             st.rerun()
 with col_kw_btn2:
-    if st.button("??? Clear Keywords"):
+    if st.button("🗑️ Clear Keywords"):
         st.session_state['trace_keywords'] = []
         st.session_state['active_focus_succ'] = []
         st.session_state['active_focus_fail'] = []
@@ -290,7 +290,7 @@ else:
     st.sidebar.info("Showing all function calls — no keyword filter applied.")
 
 # Added: Explicit Search Execution Trigger Button
-if st.sidebar.button("?? Search", type="primary"):
+if st.sidebar.button("🔍 Search", type="primary"):
     st.session_state['active_focus_succ'] = []
     st.session_state['active_focus_fail'] = []
     st.rerun()
@@ -301,12 +301,12 @@ col_uploader_l, col_uploader_r = st.columns(2)
 allowed_formats = ["txt", "gz", "zip", "log"]
 
 with col_uploader_l:
-    st.markdown("### ?? Stable Flow Case")
+    st.markdown("### 🟢 Stable Flow Case")
     uploaded_succ = st.file_uploader("Drop working trace log...", type=allowed_formats, key="u_succ", on_change=reset_panel, args=("succ",))
     load_panel(uploaded_succ, "succ")
 
 with col_uploader_r:
-    st.markdown("### ?? Defective Flow Case")
+    st.markdown("### 🔴 Defective Flow Case")
     uploaded_fail = st.file_uploader("Drop broken trace log...", type=allowed_formats, key="u_fail", on_change=reset_panel, args=("fail",))
     load_panel(uploaded_fail, "fail")
 
@@ -320,7 +320,7 @@ if trace_succ_raw or trace_fail_raw:
     keywords = st.session_state['trace_keywords']
     
     with panel_left:
-        st.markdown("### ?? Stable Tree Workspace")
+        st.markdown("### 🟢 Stable Tree Workspace")
         if trace_succ_raw:
             data_succ = scan_trace_linearly(trace_succ_raw)
             render_interactive_explorer(data_succ, keywords, "succ", "active_focus_succ")
@@ -328,7 +328,7 @@ if trace_succ_raw or trace_fail_raw:
             st.info("Awaiting structural baseline input.")
 
     with panel_right:
-        st.markdown("### ?? Defective Tree Workspace")
+        st.markdown("### 🔴 Defective Tree Workspace")
         if trace_fail_raw:
             data_fail = scan_trace_linearly(trace_fail_raw)
             render_interactive_explorer(data_fail, keywords, "fail", "active_focus_fail")
